@@ -1,13 +1,18 @@
 from pathlib import Path
 import pandas as pd
+import argparse
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
 out=Path(__file__).parent
-source=next(Path('/workspace/attachments').rglob('*.csv'))
+parser=argparse.ArgumentParser()
+parser.add_argument('source', type=Path, help='作業用2.2のCSVファイル')
+source=parser.parse_args().source
 raw=pd.read_csv(source,encoding='utf-8-sig')
 df=raw.loc[raw['参加意向'].notna()].copy()
 target=df.loc[df['参加意向'].eq('内容によっては参加したい')].copy()
+student_n=int(target['Occupation'].eq('学生').sum())
+student_all=int(df['Occupation'].eq('学生').sum())
 
 def flags(s):
     return s.fillna('').map(lambda v: ','.join(x.strip() for x in v.split(',') if x.strip())).str.get_dummies(sep=',')
@@ -29,7 +34,7 @@ notes=[
 ('有効回答',f'{len(df)}件。参加意向が空欄の末尾1行を除外。'),
 ('潜在層',f'{len(target)}人（有効回答の{len(target)/len(df)*100:.1f}%）。'),
 ('集計方法','複数回答をカンマで分割し、項目ごとに選択人数を集計。選択率の分母は潜在層472人。合計は100%を超える。'),
-('年代','20代以下は少数のため若者の傾向の断定は避ける。学生区分はなく、年代から学生とは判断しない。'),
+('年代','20代以下は少数のため若者の傾向の断定は避ける。職業欄（Occupation）の「学生」で判別できる。年代と学生区分は別に集計する。'),
 ('選択数の注意',f'最大3つ選択の設問に4つ以上の回答が潜在層で{int((choice_counts>3).sum())}件。主集計は削除せず保持。3つ以内に限定した参考集計を別シートに収録。元フォーム確認が必要。'),
 ('解釈','参加を促す効果や広報の集客効果を証明するものではない。回答者の選好と情報源の自己申告の集計。'),
 ('分析範囲','環境配慮行動の実施状況、心理的ハードルを直接測る設問は、このCSVには含まれない。'),
@@ -46,7 +51,18 @@ for col,label in [('参加インセンティブ_最大3つ選択','企画_年代
         mask=target['Age group'].eq(a); n=int(mask.sum())
         result[f'{a}（n={n}）選択率%']=(f.loc[mask].mean()*100).round(1).values if n else float('nan')
     by_age[label]=result
-sheets={'説明・注意点':pd.DataFrame(notes,columns=['項目','内容']),'参加意向_全体':intent,'潜在層_年代構成':age,'潜在層_企画':plans,'潜在層_情報源':media,**by_age,'参考_3つ以内の企画':sensitivity}
+occupation=target['Occupation'].value_counts().rename_axis('職業').reset_index(name='人数')
+occupation['構成比（%）']=(occupation['人数']/len(target)*100).round(1)
+student_tables={}
+for col,label in [('参加インセンティブ_最大3つ選択','企画_学生比較'),('情報源','情報源_学生比較')]:
+    f=flags(target[col]); result=pd.DataFrame({'項目':f.columns})
+    for group,mask in [('学生',target['Occupation'].eq('学生')),('非学生',target['Occupation'].notna() & target['Occupation'].ne('学生'))]:
+        n=int(mask.sum())
+        result[f'{group}人数（n={n}）']=f.loc[mask].sum().values
+        result[f'{group}選択率%']=(f.loc[mask].mean()*100).round(1).values
+    student_tables[label]=result
+notes.append(('学生区分',f'Occupationが学生の回答は全体{student_all}人、潜在層{student_n}人。学生・非学生比較は少数回答の参考値。非学生と大人世代は同義ではない。'))
+sheets={'説明・注意点':pd.DataFrame(notes,columns=['項目','内容']),'参加意向_全体':intent,'潜在層_職業構成':occupation,**student_tables,'潜在層_年代構成':age,'潜在層_企画':plans,'潜在層_情報源':media,**by_age,'参考_3つ以内の企画':sensitivity}
 with pd.ExcelWriter(out/'潜在層アンケート分析.xlsx',engine='openpyxl') as writer:
     for name,t in sheets.items():
         t.to_excel(writer,sheet_name=name,index=False)
@@ -59,7 +75,7 @@ with pd.ExcelWriter(out/'潜在層アンケート分析.xlsx',engine='openpyxl')
             ws.column_dimensions[get_column_letter(i)].width=75 if (i==1 and name not in ['説明・注意点','潜在層_年代構成','参加意向_全体']) else (105 if name=='説明・注意点' and i==2 else 25)
         if name=='説明・注意点':
             for i in range(2,len(t)+2): ws.row_dimensions[i].height=48
-for name,t in [('潜在層_企画',plans),('潜在層_情報源',media),('潜在層_年代構成',age)]:
+for name,t in [('潜在層_企画',plans),('潜在層_情報源',media),('潜在層_年代構成',age),('潜在層_職業構成',occupation),*student_tables.items()]:
     t.to_csv(out/(name+'.csv'),index=False,encoding='utf-8-sig')
 
 def md(t):
@@ -70,13 +86,29 @@ text=f'''# ゼロカーボン大作戦：潜在層の参加ニーズ・情報源
 ## 目的と対象
 「内容によっては参加したい」と回答した人を「潜在層」と定義し、回遊促進施策と広報施策の具体化に役立てる。これは環境関心の低い層を直接識別したものではない。
 
+使用データ：{source.name}。前版の「学生かどうか判別できない」という記述を、職業欄を用いた集計に更新した。企画・情報源・年代・参加意向の回答内容は前データと一致するため、従来のランキングは変わらない。
+
 有効回答{len(df)}人のうち潜在層は{len(target)}人（{len(target)/len(df)*100:.1f}%）。元CSVの末尾にある参加意向空欄の1行は除外した。
 
 ## 潜在層の年代構成
 
 {md(age)}
 
-潜在層の20代以下は{young}人。学生かどうかは識別できず、若者・学生についての一般化は避ける。主に今回回答した大人世代のニーズを把握する資料として用いる。
+潜在層の20代以下は{young}人。作業用2.2には職業欄（Occupation）があり、「学生」で学生区分を判別できる。学生は全回答で{student_all}人、潜在層では{student_n}人。非学生は潜在層で{len(target)-student_n}人。「非学生」は職業による区分であり、「大人世代」と同義ではない。学生と年代は別々の軸として扱う。
+
+## 潜在層の職業構成
+
+{md(occupation)}
+
+## 学生・非学生の企画ニーズ比較
+
+{md(student_tables["企画_学生比較"])}
+
+## 学生・非学生の情報源比較
+
+{md(student_tables["情報源_学生比較"])}
+
+学生の潜在層は4人なので、1人の違いが25ポイントに相当する。順位や割合の差は参考値であり、学生一般の特徴や世代差の証拠とはしない。学生の好みの探索と、追加の聞き取りの手がかりとして使う。
 
 ## 参加したくなる企画
 
@@ -107,9 +139,9 @@ text=f'''# ゼロカーボン大作戦：潜在層の参加ニーズ・情報源
 
 ## 収録ファイル
 
-- 潜在層アンケート分析.xlsx：説明、全体の参加意向、潜在層年代構成、企画・情報源ランキング、年代別比較、選択数に関する参考集計。
+- 潜在層アンケート分析.xlsx：説明、全体の参加意向、潜在層年代構成、企画・情報源ランキング、年代別比較、職業構成、学生・非学生比較、選択数に関する参考集計。
 - 潜在層_企画.csv／潜在層_情報源.csv／潜在層_年代構成.csv：表の再利用用。
-- analyze.py：元CSVから資料を再生成するPythonスクリプト（pandas、openpyxlが必要）。
+- analyze.py：元CSVから資料を再生成するPythonスクリプト（pandas、openpyxlが必要）。実行例：python analyze.py "作業用2.2のCSVパス"。
 '''
 (out/'潜在層分析レポート.md').write_text(text,encoding='utf-8')
 print('有効回答:',len(df),'潜在層:',len(target),'潜在層20代以下:',young,'4つ以上:',int((choice_counts>3).sum()))
